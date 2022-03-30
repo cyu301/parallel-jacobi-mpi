@@ -39,16 +39,16 @@ void jacobiGrid::setN_bar(size_t n_bar_)
 void jacobiGrid::distributeVec(vector <double>* b_)
 {
 	local_b = new double[n_bar];
-	if (my_row == 0)
+	if (my_col == 0)
 	{
-		MPI_Scatter(&(*b_)[0], n_bar, MPI_DOUBLE, local_b, n_bar, MPI_DOUBLE, 0, row_comm);
+		MPI_Scatter(&(*b_)[0], n_bar, MPI_DOUBLE, local_b, n_bar, MPI_DOUBLE, 0, col_comm);
 	}
-	MPI_Bcast(local_b, n_bar, MPI_DOUBLE, 0, col_comm);
+	MPI_Bcast(local_b, n_bar, MPI_DOUBLE, 0, row_comm);
 }
 
 void jacobiGrid::distributeMat(vector <double>* A_)
 {
-	local_A = new double[n_bar * n_bar];
+	local_A = new double[n_bar * n_bar + n_bar];
 	double* temp = new double[n_bar * n];
 	if (my_col == 0)
 	{
@@ -58,6 +58,14 @@ void jacobiGrid::distributeMat(vector <double>* A_)
 	{
 		MPI_Scatter(&temp[n * i], n_bar, MPI_DOUBLE, &local_A[n_bar * i], n_bar, MPI_DOUBLE, 0, row_comm);	
 	}
+	if(isDiag())
+	{
+		for (size_t i = 0; i < n_bar; ++i)
+		{
+			local_A[n_bar * n_bar + i] = local_A[i * n_bar + i];
+		}
+	}
+	MPI_Bcast(&local_A[n_bar * n_bar], n_bar, MPI_DOUBLE, my_row, row_comm);
 	delete[] temp;
 }
 
@@ -71,7 +79,7 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 
 	double* x_new = new double[n_bar]();
 	double* x_old = new double[n_bar]();
-	double* x_reduce = new double[n_bar]();
+	double* x_red = new double[n_bar](); // before reduce
 	
 	while (!converged && count_iter < max_iter)
 	{
@@ -79,35 +87,26 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 		swap(x_old, x_new);
 		for (size_t i = 0; i < n_bar; ++i)
 		{
-			x_new[i] = 0.0;
+			x_red[i] = local_b[i] / row_len;
 		}
 
-		//sum Aij xik
+		// calculate local
 		for (size_t i = 0; i < n_bar; ++i)
 		{
 			for (size_t j = 0; j < n_bar; ++j)
 			{
-				x_new[i] -= local_A[i * n_bar + j] * x_old[j];
+				if (!isDiag() or i != j) 
+				{
+					x_red[i] -= local_A[i * n_bar + j] * x_old[j];
+				}
 			}
+			x_red[i] /= local_A[n_bar * n_bar + i];
 		}
 
-		//reduce in row to diag
-		MPI_Reduce(x_new, x_reduce, n_bar, MPI_DOUBLE, MPI_SUM, my_row, row_comm);
+		// all reduce in row
+		MPI_Allreduce(x_red, x_new, n_bar, MPI_DOUBLE, MPI_SUM, row_comm);
 
-		//diag conduct result
-		if (isDiag())
-		{
-			for (size_t i = 0; i < n_bar; ++i)
-			{
-				x_new[i] = (x_reduce[i] + local_b[i] +
-					x_old[i] * local_A[i * n_bar + i]) / local_A[i * n_bar + i];
-			}
-		}
-
-		//broadcast in row x_new
-		MPI_Bcast(x_new, n_bar, MPI_DOUBLE, my_row, row_comm);
-
-		//talk to transpose
+		// talk to transpose
 		if (!isDiag())
 		{
 			MPI_Sendrecv_replace(x_new, n_bar, MPI_DOUBLE,
@@ -152,7 +151,7 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 
 	delete[] x_new;
 	delete[] x_old;
-	delete[] x_reduce;
+	delete[] x_red;
 	delete[] x_star_global;
 	return converged;
 }
@@ -170,7 +169,7 @@ void jacobiGrid::displayLocalVec(char a)
 void jacobiGrid::displayLocalMat(char a)
 {
 	cout << a << my_rank << "\t" << "\n";
-	for (size_t i = 0; i < n_bar; ++i)
+	for (size_t i = 0; i < n_bar + 1; ++i)
 	{
 		for (size_t j = 0; j < n_bar; ++j)
 		{
