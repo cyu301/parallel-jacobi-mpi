@@ -77,17 +77,17 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 	int count_iter = 0;
 	MPI_Status status;
 
-	double* x_new = new double[n_bar]();
-	double* x_old = new double[n_bar]();
-	double* x_red = new double[n_bar](); // before reduce
+	double* x_new = new double[n_bar + 1]();
+	double* x_old = new double[n_bar + 1]();
+	double* x_reduce = new double[n_bar + 1](); // before reduce
 	
-	while (!converged && count_iter < max_iter)
+	while (count_iter < max_iter)
 	{
 		// swap new and old
 		swap(x_old, x_new);
 		for (size_t i = 0; i < n_bar; ++i)
 		{
-			x_red[i] = local_b[i] / row_len;
+			x_reduce[i] = local_b[i] / row_len;
 		}
 
 		// calculate local
@@ -97,14 +97,18 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 			{
 				if (!isDiag() or i != j) 
 				{
-					x_red[i] -= local_A[i * n_bar + j] * x_old[j];
+					x_reduce[i] -= local_A[i * n_bar + j] * x_old[j];
 				}
 			}
-			x_red[i] /= local_A[n_bar * n_bar + i];
+			x_reduce[i] /= local_A[n_bar * n_bar + i];
 		}
 
 		// all reduce in row
-		MPI_Allreduce(x_red, x_new, n_bar, MPI_DOUBLE, MPI_SUM, row_comm);
+		MPI_Allreduce(x_reduce, x_new, n_bar + 1, MPI_DOUBLE, MPI_SUM, row_comm);
+
+		// convergence check
+		converged = (x_new[n_bar] < tol * tol);
+		if (converged && count_iter > 0) break;
 
 		// talk to transpose
 		if (!isDiag())
@@ -114,15 +118,12 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 		}
 
 		// diff for local x
-		double sum = 0;
+		x_reduce[n_bar] = 0;
 		for (size_t i = 0; i < n_bar; ++i)
 		{
-			sum += (x_old[i] - x_new[i]) * (x_old[i] - x_new[i]);
+			x_reduce[n_bar] += (x_old[i] - x_new[i]) * (x_old[i] - x_new[i]);
 		}
-		diff = sqrt(sum);
-		MPI_Allreduce(&diff, &diff_glo, 1, MPI_DOUBLE, MPI_SUM, row_comm);
 
-		converged = (diff_glo < tol);
 		++count_iter;
 	} // end of while
 
@@ -151,7 +152,7 @@ bool jacobiGrid::jacobi(double tol, int max_iter)
 
 	delete[] x_new;
 	delete[] x_old;
-	delete[] x_red;
+	delete[] x_reduce;
 	delete[] x_star_global;
 	return converged;
 }
